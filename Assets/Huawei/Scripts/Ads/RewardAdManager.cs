@@ -73,14 +73,20 @@ namespace HmsPlugin
             HwAds.Init();
         }
 
-        private void LoadNextRewardedAd()
+        private void LoadNextRewardedAd(bool isShow = false)
         {
             Debug.Log("[HMS] AdsManager LoadNextRewardedAd");
             rewardAd = new RewardAd(AdId);
             rewardAd.LoadAd(
                 new AdParam.Builder().Build(),
-                () => Debug.Log("[HMS] Rewarded ad loaded!"),
-                (errorCode) => Debug.Log($"[HMS] Rewarded ad loading failed with error ${errorCode}")
+                () => {
+                    Debug.Log("[HMS] Rewarded ad loaded!");
+                    if (isShow) this.ShowRewardedAd();
+                },
+                (errorCode) => {
+                    Debug.Log($"[HMS] Rewarded ad loading failed with error ${errorCode}");
+                    if (isShow) this.OnRewardAdFailedToShow?.Invoke(errorCode);
+                }
             );
         }
 
@@ -95,7 +101,29 @@ namespace HmsPlugin
             else
             {
                 Debug.Log("[HMS] Reward ad clicked but still not loaded");
+                this.OnRewardAdFailedToShow?.Invoke(-1);
             }
+        }
+
+        public void Show(string adId)
+        {
+            Debug.Log("[HMS] AdsManager Show");
+            if (rewardAd?.Loaded == true)
+            {
+                if (adId == this.mAdId)
+                {
+                    this.ShowRewardedAd();
+                }
+                else
+                {
+                    Debug.Log("[HMS] AdsManager rewardAd.Destroy");
+                    rewardAd.Destroy();
+                }
+                return;
+            }
+
+            this.mAdId = adId;
+            this.LoadNextRewardedAd(true);
         }
     }
 }
