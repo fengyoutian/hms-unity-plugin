@@ -10,7 +10,6 @@ using UnityEngine.Purchasing.Extension;
 using System.Linq;
 using System.Text;
 
-
 namespace HmsPlugin
 {
     public partial class HuaweiStore : IStore
@@ -36,12 +35,16 @@ namespace HmsPlugin
         List<ProductInfo>               productsList;
         Dictionary<string, ProductInfo> productsByID;
         Dictionary<string, InAppPurchaseData> purchasedData;
+        Dictionary<string, string> inAppSignature;
+        Dictionary<string, string> inAppPurchaseData;
         void BaseInit()
         {
-            this.locker        = new object();
-            this.productsList  = new List<ProductInfo>(100);
-            this.productsByID  = new Dictionary<string, ProductInfo>(100);
-            this.purchasedData = new Dictionary<string, InAppPurchaseData>(50);
+            this.locker             = new object();
+            this.productsList       = new List<ProductInfo>(100);
+            this.productsByID       = new Dictionary<string, ProductInfo>(100);
+            this.purchasedData      = new Dictionary<string, InAppPurchaseData>(50);
+            this.inAppSignature     = new Dictionary<string, string>(50);
+            this.inAppPurchaseData  = new Dictionary<string, string>(50);
         }
 
         private IIapClient iapClient;
@@ -101,6 +104,12 @@ namespace HmsPlugin
 
         private void CreateProductRequest(List<string> consumablesIDs, HuaweiConstants.IAP.IapType type, System.Action onSuccess)
         {
+            // If there are no ids then continue
+            if (consumablesIDs.Count == 0) {
+                onSuccess();
+                return;
+            }
+
             var productsDataRequest        = new ProductInfoReq();
             productsDataRequest.PriceType  = (int)type;
             productsDataRequest.ProductIds = consumablesIDs;
@@ -111,7 +120,7 @@ namespace HmsPlugin
         }
 
         void GetProductsFailure(HMSException exception)
-        {   
+        {
             this.storeEvents.OnSetupFailed(InitializationFailureReason.PurchasingUnavailable);
         }
 
@@ -121,24 +130,24 @@ namespace HmsPlugin
             if (result.ProductInfoList.Count == 0) return;
 
             foreach (ProductInfo productInfo in result.ProductInfoList)
-            {   
+            {
                 this.productsList.Add(productInfo);
                 this.productsByID.Add(productInfo.ProductId, productInfo);
             }
         }
 
         void LoadOwnedConsumables()
-        {   
+        {
             CreateOwnedPerchaseRequest(HuaweiConstants.IAP.IapType.CONSUMABLE, LoadOwnedNonConsumables);
         }
 
         void LoadOwnedNonConsumables()
-        {   
+        {
             CreateOwnedPerchaseRequest(HuaweiConstants.IAP.IapType.NON_CONSUMABLE, LoadOwnedSubscribes);
         }
 
         void LoadOwnedSubscribes()
-        {   
+        {
             CreateOwnedPerchaseRequest(HuaweiConstants.IAP.IapType.SUBSCRIPTION, ProductsLoaded);
         }
 
@@ -148,7 +157,6 @@ namespace HmsPlugin
             ownedPurchasesReq.PriceType  = (int)type;
 
             var task = iapClient.ObtainOwnedPurchases(ownedPurchasesReq);
-
             task.AddOnSuccessListener((result) => { ParseOwned(result); onSuccess(); });
         }
 
@@ -156,10 +164,21 @@ namespace HmsPlugin
         {
             if (result == null || result.InAppPurchaseDataList == null) return;
 
-            foreach (string inAppPurchaseData in result.InAppPurchaseDataList)
+            // foreach (string inAppPurchaseData in result.InAppPurchaseDataList)
+            // {
+            //     InAppPurchaseData inAppPurchaseDataBean             = new InAppPurchaseData(inAppPurchaseData);
+            //     this.purchasedData[inAppPurchaseDataBean.ProductId] = inAppPurchaseDataBean;
+            // }
+
+            for (var i = 0; i < result.InAppPurchaseDataList.Count; i++)
             {
-                InAppPurchaseData inAppPurchaseDataBean             = new InAppPurchaseData(inAppPurchaseData);
-                this.purchasedData[inAppPurchaseDataBean.ProductId] = inAppPurchaseDataBean;
+                string inAppPurchaseData                        = result.InAppPurchaseDataList[i];
+                InAppPurchaseData inAppPurchaseDataBean         = new InAppPurchaseData(inAppPurchaseData);
+                var productId                                   = inAppPurchaseDataBean.ProductId;
+
+                this.inAppSignature[productId]                  = result.InAppSignature[i];
+                this.inAppPurchaseData[productId]               = inAppPurchaseData;
+                this.purchasedData[productId]                   = inAppPurchaseDataBean;
             }
         }
 
@@ -179,8 +198,13 @@ namespace HmsPlugin
                 ProductDescription prodDesc;
 
                 if(this.purchasedData.TryGetValue(product.ProductId, out var purchaseData))
-                {                    
-                    prodDesc  = new ProductDescription(product.ProductId, prodMeta, CreateReciept(purchaseData),purchaseData.OrderID);
+                {
+                    // var receipt = CreateReceipt(purchaseData);
+                    this.inAppPurchaseData.TryGetValue(product.ProductId, out var purchaseOriginalJson);
+                    this.inAppSignature.TryGetValue(product.ProductId, out var purchaseSignature);
+                    var receipt = EncodeReceipt(purchaseOriginalJson, purchaseSignature, ProductToJson(product));
+
+                    prodDesc  = new ProductDescription(product.ProductId, prodMeta, receipt, purchaseData.OrderID);
                 }
                 else prodDesc = new ProductDescription(product.ProductId, prodMeta);
 
@@ -190,7 +214,7 @@ namespace HmsPlugin
             this.storeEvents.OnProductsRetrieved(descList);
         }
 
-        string CreateReciept(InAppPurchaseData purchaseData)
+        string CreateReceipt(InAppPurchaseData purchaseData)
         {
             var sb = new StringBuilder(1024);
 
@@ -199,9 +223,48 @@ namespace HmsPlugin
             sb.Append('}');
             sb.Append('}');
             return sb.ToString();
-
         }
 
+        internal string EncodeReceipt(string purchaseOriginalJson, string purchaseSignature, string skuDetailsJson)
+        {
+            return FormatPayload(purchaseOriginalJson, purchaseSignature, skuDetailsJson);
+        }
+
+        string FormatPayload(string json, string signature, string skuDetails) {
+            var dic = new Dictionary<string, string>
+            {
+                ["json"] = json,
+                ["signature"] = signature,
+                ["skuDetails"] = skuDetails
+            };
+            return MiniJson.JsonEncode(dic);
+        }
+
+        string ProductToJson(ProductInfo info)
+        {
+            var sb = new StringBuilder();
+
+            sb.Append('{')
+                .Append("\"productId\":\"").Append(info.ProductId).Append("\"")
+                .Append(", \"priceType\":\"").Append(info.PriceType).Append("\"")
+                .Append(", \"price\":\"").Append(info.Price).Append("\"")
+                .Append(", \"microsPrice\":\"").Append(info.MicrosPrice).Append("\"")
+                .Append(", \"originalLocalPrice\":\"").Append(info.OriginalLocalPrice).Append("\"")
+                .Append(", \"originalMicroPrice\":\"").Append(info.OriginalMicroPrice).Append("\"")
+                .Append(", \"currency\":\"").Append(info.Currency).Append("\"")
+                .Append(", \"productName\":\"").Append(info.ProductName).Append("\"")
+                .Append(", \"productDesc\":\"").Append(info.ProductDesc).Append("\"")
+                .Append(", \"subPeriod\":\"").Append(info.SubPeriod).Append("\"")
+                .Append(", \"subSpecialPrice\":\"").Append(info.SubSpecialPrice).Append("\"")
+                .Append(", \"subSpecialPriceMicros\":\"").Append(info.SubSpecialPriceMicros).Append("\"")
+                .Append(", \"subSpecialPeriod\":\"").Append(info.SubSpecialPeriod).Append("\"")
+                .Append(", \"subFreeTrialPeriod\":\"").Append(info.SubFreeTrialPeriod).Append("\"")
+                .Append(", \"subGroupId\":\"").Append(info.SubGroupId).Append("\"")
+                .Append(", \"subGroupTitle\":\"").Append(info.SubGroupTitle).Append("\"")
+                .Append(", \"subProductLevel\":\"").Append(info.SubProductLevel).Append("\"")
+            .Append('}');
+            return sb.ToString();
+        }
 
         void IStore.Purchase(ProductDefinition product, string developerPayload)
         {
@@ -249,7 +312,10 @@ namespace HmsPlugin
                     case OrderStatusCode.ORDER_STATE_SUCCESS:
                         var data = new InAppPurchaseData(purchaseResultInfo.InAppPurchaseData);
                         this.purchasedData[product.storeSpecificId] = data;
-                        storeEvents.OnPurchaseSucceeded(product.storeSpecificId, purchaseResultInfo.InAppDataSignature, data.OrderID );
+
+                        this.productsByID.TryGetValue(product.storeSpecificId, out var productInfo);
+                        var receipt = EncodeReceipt(purchaseResultInfo.InAppPurchaseData, purchaseResultInfo.InAppDataSignature, ProductToJson(productInfo));
+                        storeEvents.OnPurchaseSucceeded(product.storeSpecificId, receipt, data.OrderID );
                         break;
 
                     case OrderStatusCode.ORDER_PRODUCT_OWNED:
